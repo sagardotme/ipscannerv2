@@ -488,9 +488,9 @@ def threaded_worker(
                 renderer.log(f"[!] Worker error on {ip}: {exc}")
 
             if (
-                local_processed >= 64
-                or local_timeout_errors >= 16
-                or local_other_errors >= 16
+                local_processed >= 128
+                or local_timeout_errors >= 32
+                or local_other_errors >= 32
                 or local_found
             ):
                 apply_scan_deltas(
@@ -578,7 +578,7 @@ def print_final_summary() -> None:
 
 def run_threaded_scan(ip_list: List[str]) -> None:
     requested_workers = max(DEFAULT_WORKERS, 1)
-    chunk_size = max(8, min(64, len(ip_list) // max(requested_workers * 6, 1)))
+    chunk_size = max(16, min(128, len(ip_list) // max(requested_workers * 3, 1)))
     index_state = {"next_index": 0}
     index_lock = threading.Lock()
     scan_done_event.clear()
@@ -597,23 +597,29 @@ def run_threaded_scan(ip_list: List[str]) -> None:
         stats.start_time = time.time()
         stats.found_ips = []
 
+    stack_kb = 128
+    memory_for_stacks_gb = requested_workers * stack_kb / 1024 / 1024
     renderer.log(f"[*] Starting threaded scan with target {requested_workers:,} workers")
     renderer.log(f"[*] Chunk size: ~{chunk_size} IPs per worker pull")
+    renderer.log(f"[*] Thread stack size: {stack_kb}KB ({memory_for_stacks_gb:.1f}GB reserved for stacks)")
 
     progress_thread = threading.Thread(target=progress_reporter, daemon=True, name="progress-reporter")
     progress_thread.start()
 
+    old_stack_size = threading.stack_size(stack_kb * 1024)
     try:
         with ThreadPoolExecutor(max_workers=requested_workers) as executor:
             futures = []
+            update_interval = max(1, requested_workers // 20)
 
             for worker_number in range(requested_workers):
                 try:
                     futures.append(
                         executor.submit(threaded_worker, ip_list, index_state, index_lock, chunk_size)
                     )
-                    with stats_lock:
-                        stats.started_workers = len(futures)
+                    if len(futures) % update_interval == 0:
+                        with stats_lock:
+                            stats.started_workers = len(futures)
                 except (RuntimeError, MemoryError, OSError) as exc:
                     started_workers = max(1, len(futures))
                     with stats_lock:
@@ -641,6 +647,7 @@ def run_threaded_scan(ip_list: List[str]) -> None:
                     apply_scan_deltas(other_errors=1)
                     renderer.log(f"[!] Worker future error: {exc}")
     finally:
+        threading.stack_size(old_stack_size)
         scan_done_event.set()
         progress_thread.join(timeout=2.0)
 

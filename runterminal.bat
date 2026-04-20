@@ -57,8 +57,9 @@ if not exist "found" (
     mkdir found
 )
 
-set "SCANNER_TERMINAL_WORKERS=4000"
-set "SCANNER_TERMINAL_TIMEOUT=10"
+set "SCANNER_TERMINAL_WORKERS=10000"
+set "SCANNER_TERMINAL_TIMEOUT=5"
+set "SCANNER_TERMINAL_RETRYABLE_RETRIES=0"
 
 echo [*] Starting terminal scan automatically...
 echo.
