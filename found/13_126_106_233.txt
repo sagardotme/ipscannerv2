@@ -1,0 +1,22 @@
+IP: 13.126.106.233
+Timestamp: 2026-04-12T16:07:29.169283
+Status Code: 500
+Headers: {
+  "date": "Sun, 12 Apr 2026 10:07:29 GMT",
+  "content-type": "application/json",
+  "content-length": "169",
+  "vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+  "x-content-type-options": "nosniff",
+  "x-xss-protection": "0",
+  "cache-control": "no-cache, no-store, max-age=0, must-revalidate",
+  "pragma": "no-cache",
+  "expires": "0",
+  "strict-transport-security": "max-age=31536000 ; includeSubDomains",
+  "x-frame-options": "DENY",
+  "content-security-policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; connect-src 'self' https: http:;",
+  "referrer-policy": "strict-origin-when-cross-origin"
+}
+
+==================================================
+Response:
+{"data":null,"statusCode":500,"message":"Internal server error: Request method 'GET' is not supported","successFlag":false,"serverTime":"2026-04-12T10:07:29.687562273Z"}
