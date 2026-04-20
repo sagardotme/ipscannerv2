@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue as _queue
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -380,11 +380,14 @@ class IPScanner:
             note_request_started()
             try:
                 session = self.get_session()
+                # Tuple timeout: (connect_timeout, total_timeout)
+                # Aggressively kills stuck TCP connects before the full timeout
+                _t = (min(3.0, REQUEST_TIMEOUT), REQUEST_TIMEOUT)
                 if CURL_CFFI_AVAILABLE:
                     response = session.get(
                         url,
                         headers=headers,
-                        timeout=REQUEST_TIMEOUT,
+                        timeout=_t,
                         verify=False,
                         impersonate="chrome110",
                         allow_redirects=False,
@@ -393,7 +396,7 @@ class IPScanner:
                     response = session.get(
                         url,
                         headers=headers,
-                        timeout=REQUEST_TIMEOUT,
+                        timeout=_t,
                         verify=False,
                         allow_redirects=False,
                     )
@@ -440,85 +443,80 @@ class IPScanner:
 scanner = IPScanner()
 
 
-def threaded_worker(
-    ip_list: List[str],
-    index_state: dict,
-    index_lock: threading.Lock,
-    chunk_size: int,
-) -> int:
-    local_processed = 0
-    local_found = 0
-    local_not_found = 0
-    local_timeout_errors = 0
-    local_other_errors = 0
-    local_found_ips: List[str] = []
-    total_ips = len(ip_list)
+def _make_worker(work_q: "_queue.Queue[str]", in_progress: dict, in_progress_lock: threading.Lock):
 
-    while not stop_event.is_set():
-        with index_lock:
-            start = index_state["next_index"]
-            index_state["next_index"] += chunk_size
+    def _worker() -> None:
+        local_processed = 0
+        local_found = 0
+        local_not_found = 0
+        local_timeout_errors = 0
+        local_other_errors = 0
+        local_found_ips: List[str] = []
 
-        if start >= total_ips:
-            break
+        def _flush() -> None:
+            nonlocal local_processed, local_found, local_not_found
+            nonlocal local_timeout_errors, local_other_errors, local_found_ips
+            apply_scan_deltas(
+                processed=local_processed,
+                found=local_found,
+                not_found=local_not_found,
+                timeout_errors=local_timeout_errors,
+                other_errors=local_other_errors,
+                found_ips=local_found_ips,
+            )
+            local_processed = local_found = local_not_found = 0
+            local_timeout_errors = local_other_errors = 0
+            local_found_ips = []
 
-        end = min(start + chunk_size, total_ips)
-        for ip in ip_list[start:end]:
-            if stop_event.is_set():
-                break
+        try:
+            while not stop_event.is_set():
+                try:
+                    ip = work_q.get(timeout=0.5)
+                except _queue.Empty:
+                    break
 
-            try:
-                outcome, result = scanner.scan_ip(ip)
-                local_processed += 1
+                with in_progress_lock:
+                    in_progress[ip] = time.time()
 
-                if outcome == SCAN_FOUND and result is not None:
-                    scanner.save_found(result)
-                    local_found += 1
-                    local_found_ips.append(result["ip"])
-                    renderer.log(f"[FOUND] {result['ip']} saved to {FOUND_DIR}")
-                elif outcome == SCAN_NOT_FOUND:
-                    local_not_found += 1
-                elif outcome == SCAN_TIMEOUT:
-                    local_timeout_errors += 1
-                else:
+                try:
+                    outcome, result = scanner.scan_ip(ip)
+                    local_processed += 1
+
+                    if outcome == SCAN_FOUND and result is not None:
+                        scanner.save_found(result)
+                        local_found += 1
+                        local_found_ips.append(result["ip"])
+                        renderer.log(f"[FOUND] {result['ip']} saved to {FOUND_DIR}")
+                    elif outcome == SCAN_NOT_FOUND:
+                        local_not_found += 1
+                    elif outcome == SCAN_TIMEOUT:
+                        local_timeout_errors += 1
+                    else:
+                        local_other_errors += 1
+                except Exception as exc:
+                    local_processed += 1
                     local_other_errors += 1
-            except Exception as exc:
-                local_processed += 1
-                local_other_errors += 1
-                renderer.log(f"[!] Worker error on {ip}: {exc}")
+                    renderer.log(f"[!] Worker error on {ip}: {exc}")
+                finally:
+                    # Always remove from in_progress and always signal task done.
+                    # Watchdog only requeues the IP (put); it does NOT call task_done.
+                    # So every get() is matched by exactly one task_done() here.
+                    with in_progress_lock:
+                        in_progress.pop(ip, None)
+                    work_q.task_done()
 
-            if (
-                local_processed >= 128
-                or local_timeout_errors >= 32
-                or local_other_errors >= 32
-                or local_found
-            ):
-                apply_scan_deltas(
-                    processed=local_processed,
-                    found=local_found,
-                    not_found=local_not_found,
-                    timeout_errors=local_timeout_errors,
-                    other_errors=local_other_errors,
-                    found_ips=local_found_ips,
-                )
-                local_processed = 0
-                local_found = 0
-                local_not_found = 0
-                local_timeout_errors = 0
-                local_other_errors = 0
-                local_found_ips = []
+                if (
+                    local_processed >= 128
+                    or local_timeout_errors >= 32
+                    or local_other_errors >= 32
+                    or local_found
+                ):
+                    _flush()
+        finally:
+            if local_processed or local_found or local_timeout_errors or local_other_errors:
+                _flush()
 
-    if local_processed or local_found or local_not_found or local_timeout_errors or local_other_errors:
-        apply_scan_deltas(
-            processed=local_processed,
-            found=local_found,
-            not_found=local_not_found,
-            timeout_errors=local_timeout_errors,
-            other_errors=local_other_errors,
-            found_ips=local_found_ips,
-        )
-
-    return 1
+    return _worker
 
 
 def handle_stop_signal(signum, frame) -> None:
@@ -578,9 +576,16 @@ def print_final_summary() -> None:
 
 def run_threaded_scan(ip_list: List[str]) -> None:
     requested_workers = max(DEFAULT_WORKERS, 1)
-    chunk_size = max(16, min(128, len(ip_list) // max(requested_workers * 3, 1)))
-    index_state = {"next_index": 0}
-    index_lock = threading.Lock()
+    actual_workers = min(requested_workers, len(ip_list))
+
+    work_q: "_queue.Queue[str]" = _queue.Queue()
+    for ip in ip_list:
+        work_q.put(ip)
+
+    # ip -> time the worker claimed it; watchdog uses this to detect hangs
+    in_progress: dict = {}
+    in_progress_lock = threading.Lock()
+
     scan_done_event.clear()
     stop_event.clear()
 
@@ -597,55 +602,75 @@ def run_threaded_scan(ip_list: List[str]) -> None:
         stats.start_time = time.time()
         stats.found_ips = []
 
+    worker_fn = _make_worker(work_q, in_progress, in_progress_lock)
+
+    def _spawn() -> None:
+        t = threading.Thread(target=worker_fn, daemon=True)
+        t.start()
+
+    def _watchdog() -> None:
+        # hard_timeout: how long before we declare a request stuck
+        hard_timeout = max(REQUEST_TIMEOUT * 2 + 5.0, 15.0)
+        while not scan_done_event.is_set():
+            scan_done_event.wait(timeout=10.0)
+            if scan_done_event.is_set() or stop_event.is_set():
+                break
+
+            now = time.time()
+            with in_progress_lock:
+                stuck_ips = [ip for ip, ts in list(in_progress.items())
+                             if now - ts > hard_timeout]
+
+            if not stuck_ips:
+                continue
+
+            renderer.log(f"[watchdog] {len(stuck_ips)} stuck — requeueing + spawning {len(stuck_ips)} replacement(s)")
+
+            for ip in stuck_ips:
+                with in_progress_lock:
+                    if ip not in in_progress:
+                        continue
+                    del in_progress[ip]
+                # Requeue: work_q.put() increments unfinished_tasks by 1.
+                # The stuck thread will call task_done() when it eventually
+                # returns, balancing its original get().
+                # The replacement thread's task_done() balances this put().
+                # Total: 2 puts → 2 task_done() calls.  ✓
+                work_q.put(ip)
+                _spawn()
+                with stats_lock:
+                    stats.started_workers += 1
+
     stack_kb = 128
-    memory_for_stacks_gb = requested_workers * stack_kb / 1024 / 1024
-    renderer.log(f"[*] Starting threaded scan with target {requested_workers:,} workers")
-    renderer.log(f"[*] Chunk size: ~{chunk_size} IPs per worker pull")
-    renderer.log(f"[*] Thread stack size: {stack_kb}KB ({memory_for_stacks_gb:.1f}GB reserved for stacks)")
+    renderer.log(f"[*] Launching {actual_workers:,} threads | {stack_kb}KB stack each "
+                 f"({actual_workers * stack_kb // 1024 // 1024:.1f}GB stacks RAM)")
+    renderer.log(f"[*] Watchdog: re-queues stuck requests every 10s (threshold {int(REQUEST_TIMEOUT * 2 + 5)}s)")
 
     progress_thread = threading.Thread(target=progress_reporter, daemon=True, name="progress-reporter")
     progress_thread.start()
+    watchdog_thread = threading.Thread(target=_watchdog, daemon=True, name="watchdog")
+    watchdog_thread.start()
 
     old_stack_size = threading.stack_size(stack_kb * 1024)
+    launched = 0
     try:
-        with ThreadPoolExecutor(max_workers=requested_workers) as executor:
-            futures = []
-            update_interval = max(1, requested_workers // 20)
+        for _ in range(actual_workers):
+            try:
+                _spawn()
+                launched += 1
+            except (RuntimeError, MemoryError, OSError) as exc:
+                renderer.log(f"[!] Thread cap hit at {launched:,}: {exc}")
+                break
 
-            for worker_number in range(requested_workers):
-                try:
-                    futures.append(
-                        executor.submit(threaded_worker, ip_list, index_state, index_lock, chunk_size)
-                    )
-                    if len(futures) % update_interval == 0:
-                        with stats_lock:
-                            stats.started_workers = len(futures)
-                except (RuntimeError, MemoryError, OSError) as exc:
-                    started_workers = max(1, len(futures))
-                    with stats_lock:
-                        stats.started_workers = started_workers
-                    renderer.log(
-                        f"[!] Worker startup hit a limit at {worker_number + 1:,}/{requested_workers:,}. "
-                        f"Continuing with {started_workers:,} worker(s). Reason: {exc}"
-                    )
-                    break
+        with stats_lock:
+            stats.started_workers = launched
 
-            if not futures:
-                with stats_lock:
-                    stats.started_workers = 1
-                renderer.log("[!] No worker thread could be created. Falling back to inline scan.")
-                threaded_worker(ip_list, index_state, index_lock, chunk_size)
-                return
+        if launched == 0:
+            renderer.log("[!] No threads could start — aborting.")
+            return
 
-            with stats_lock:
-                stats.started_workers = len(futures)
-
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as exc:
-                    apply_scan_deltas(other_errors=1)
-                    renderer.log(f"[!] Worker future error: {exc}")
+        renderer.log(f"[*] {launched:,} threads live — scanning...")
+        work_q.join()
     finally:
         threading.stack_size(old_stack_size)
         scan_done_event.set()
