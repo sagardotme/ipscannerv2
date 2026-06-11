@@ -1,0 +1,8 @@
+IP: 13.232.197.1
+Timestamp: 2026-06-11T15:28:23.044377
+Status Code: None
+Headers: {}
+
+==================================================
+Response:
+SSL certificate matches *.ivacbd.com

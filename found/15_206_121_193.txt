@@ -1,0 +1,8 @@
+IP: 15.206.121.193
+Timestamp: 2026-06-11T15:40:34.882173
+Status Code: None
+Headers: {}
+
+==================================================
+Response:
+SSL certificate matches *.ivacbd.com

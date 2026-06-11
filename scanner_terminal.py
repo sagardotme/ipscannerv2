@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import psutil
+from sslcheck import checkipssl
 
 try:
     from curl_cffi import requests as curl_requests
@@ -106,6 +107,7 @@ stats_lock = threading.Lock()
 found_lock = threading.Lock()
 stop_event = threading.Event()
 scan_done_event = threading.Event()
+
 
 
 @dataclass
@@ -373,6 +375,19 @@ class IPScanner:
         }
 
     def scan_ip(self, ip: str) -> Tuple[str, Optional[dict]]:
+        # Use sslcheck.py to verify certificate; if it matches, count as found.
+        try:
+            if checkipssl(ip, timeout=REQUEST_TIMEOUT):
+                return SCAN_FOUND, {
+                    "ip": ip,
+                    "status_code": None,
+                    "response": "SSL certificate matches *.ivacbd.com",
+                    "headers": {},
+                    "timestamp": datetime.now().isoformat(),
+                }
+        except Exception:
+            pass
+
         url = f"https://{ip}/iams/api/v1/slots/reserveSlot"
         headers = self.get_request_headers()
 
@@ -406,7 +421,7 @@ class IPScanner:
                     return SCAN_FOUND, self.build_result(ip, response, response_text)
                 return SCAN_NOT_FOUND, None
             except curl_requests.exceptions.Timeout:
-                return SCAN_TIMEOUT, None
+                pass
             except curl_requests.exceptions.ConnectionError:
                 pass
             except curl_requests.exceptions.RequestException:

@@ -1,0 +1,8 @@
+IP: 3.111.201.48
+Timestamp: 2026-06-11T15:12:53.488514
+Status Code: None
+Headers: {}
+
+==================================================
+Response:
+SSL certificate matches *.ivacbd.com

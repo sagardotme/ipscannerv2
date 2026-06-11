@@ -41,10 +41,10 @@ if not exist "venv\Scripts\python.exe" (
 set "PYTHON=venv\Scripts\python.exe"
 
 echo [*] Checking terminal scanner dependencies...
-"%PYTHON%" -c "import requests, psutil; from curl_cffi import requests as _" >nul 2>&1
+"%PYTHON%" -c "import requests, psutil, cryptography; from curl_cffi import requests as _" >nul 2>&1
 if errorlevel 1 (
     echo [*] Installing missing dependencies...
-    "%PYTHON%" -m pip install -q requests psutil curl-cffi
+    "%PYTHON%" -m pip install -q requests psutil curl-cffi cryptography
     if errorlevel 1 (
         echo [ERROR] Failed to install dependencies.
         echo.
@@ -57,9 +57,9 @@ if not exist "found" (
     mkdir found
 )
 
-set "SCANNER_TERMINAL_WORKERS=10000"
+set "SCANNER_TERMINAL_WORKERS=6000"
 set "SCANNER_TERMINAL_TIMEOUT=5"
-set "SCANNER_TERMINAL_RETRYABLE_RETRIES=0"
+set "SCANNER_TERMINAL_RETRYABLE_RETRIES=2"
 
 echo [*] Starting terminal scan automatically...
 echo.
